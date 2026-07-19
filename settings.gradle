@@ -1,0 +1,2 @@
+rootProject.name = "Vicious Ability"
+include ':app'
