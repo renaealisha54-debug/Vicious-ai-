@@ -1,3 +1,11 @@
+
+
+![Vicious Logo](assets/vicious-logo.png)
+
+
+
+© 2026 Love. All rights reserved.
+
 # Vicious Ability
 
 Voice-first personal assistant — Android launcher (Kotlin/Compose) + Termux CLI backend.
