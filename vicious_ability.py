@@ -66,14 +66,7 @@ def speak(text):
 
 
 def listen():
-    """Use Termux microphone"""
-    print("🎤 Listening... (Speak now)")
-    try:
-        subprocess.check_output(["termux-microphone-record", "-d"], stderr=subprocess.STDOUT)
-        subprocess.run(["termux-microphone-record", "-q"])
-        return input("Type what you said for testing: ").lower()
-    except Exception:
-        return input("🎤 Type command: ").lower()
+    return input("🎤 Type command: ").strip().lower()
 
 
 def handle_cd(command):
