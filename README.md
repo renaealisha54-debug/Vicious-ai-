@@ -4,7 +4,7 @@
 
 
 
-© 2026 Love. All rights reserved.
+© 2026 Alisha Bevis. All rights reserved.
 
 # Vicious Ability
 
