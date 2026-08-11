@@ -6,3 +6,4 @@ local.properties
 vicious_memory.json
 .idea/
 *.iml
+.gradle/
