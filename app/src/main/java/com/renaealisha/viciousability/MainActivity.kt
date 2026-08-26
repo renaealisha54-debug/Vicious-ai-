@@ -18,6 +18,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -31,6 +33,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -38,14 +41,59 @@ import java.net.URL
 private const val PREFS_NAME = "vicious_ability_prefs"
 private const val PREF_GROQ_KEY = "groq_api_key"
 
+// Backup copy in public storage so the key survives an app uninstall/reinstall
+// (e.g. after a debug signing key change forces a fresh install, which wipes
+// private SharedPreferences). Requires "All files access"; silently no-ops
+// otherwise, same as CommandManager's exportPublicMirror.
+private val groqKeyBackupFile: File
+    get() = File(
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+        ".vicious_groq_key"
+    )
+
 fun loadGroqKey(context: android.content.Context): String? {
     val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-    return prefs.getString(PREF_GROQ_KEY, null)?.takeIf { it.isNotBlank() }
+    prefs.getString(PREF_GROQ_KEY, null)?.takeIf { it.isNotBlank() }?.let { return it }
+
+    // Private prefs are empty — fall back to the public backup copy and
+    // restore it into prefs so future launches skip this check.
+    return try {
+        groqKeyBackupFile.takeIf { it.exists() }
+            ?.readText()?.trim()?.takeIf { it.isNotBlank() }
+            ?.also { restored -> prefs.edit().putString(PREF_GROQ_KEY, restored).apply() }
+    } catch (e: Exception) {
+        null
+    }
 }
 
 fun saveGroqKey(context: android.content.Context, key: String) {
+    val trimmed = key.trim()
     val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-    prefs.edit().putString(PREF_GROQ_KEY, key.trim()).apply()
+    prefs.edit().putString(PREF_GROQ_KEY, trimmed).apply()
+    try {
+        groqKeyBackupFile.writeText(trimmed)
+    } catch (e: Exception) {
+        // No "All files access" yet, or storage otherwise unwritable — ignore.
+    }
+}
+
+// ---- Git identity + repo path (used to build commit/push commands) ----
+private const val PREF_GIT_EMAIL = "git_email"
+private const val PREF_GIT_REPO_PATH = "git_repo_path"
+
+fun loadGitConfig(context: android.content.Context): Pair<String?, String?> {
+    val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+    val email = prefs.getString(PREF_GIT_EMAIL, null)?.takeIf { it.isNotBlank() }
+    val repoPath = prefs.getString(PREF_GIT_REPO_PATH, null)?.takeIf { it.isNotBlank() }
+    return email to repoPath
+}
+
+fun saveGitConfig(context: android.content.Context, email: String, repoPath: String) {
+    val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+    prefs.edit()
+        .putString(PREF_GIT_EMAIL, email.trim())
+        .putString(PREF_GIT_REPO_PATH, repoPath.trim())
+        .apply()
 }
 
 /**
@@ -54,29 +102,51 @@ fun saveGroqKey(context: android.content.Context, key: String) {
  * two stay consistent. Runs the network call on a background thread and
  * delivers the result back on the main thread via onResult.
  */
-fun askGroqForCommand(phrase: String, apiKey: String, onResult: (String?, String?) -> Unit) {
+fun askGroqForCommand(
+    phrase: String,
+    apiKey: String,
+    gitEmail: String? = null,
+    gitRepoPath: String? = null,
+    onResult: (String?, String?) -> Unit
+) {
     Thread {
         var resultCommand: String? = null
         var resultError: String? = null
         try {
-            val messages = JSONArray()
-            messages.put(JSONObject().apply {
-                put("role", "system")
-                put(
-                    "content",
+            val systemPrompt = buildString {
+                append(
                     "You translate a spoken/typed request into a single exact " +
-                        "Linux/Termux shell command that would accomplish it. " +
-                        "Respond with ONLY the raw command on one line - no explanation, " +
+                        "Linux/Termux shell command that would accomplish it. "
+                )
+                if (!gitRepoPath.isNullOrBlank()) {
+                    append("The user's active git repo is at $gitRepoPath")
+                    if (!gitEmail.isNullOrBlank()) {
+                        append(", and their git commit email is $gitEmail")
+                    }
+                    append(
+                        ". For any git commit or push request, cd into that repo, " +
+                            "set the commit identity with 'git config user.email' " +
+                            "if an email is given, then run the requested git command(s), " +
+                            "chained with && on one line. "
+                    )
+                }
+                append(
+                    "Respond with ONLY the raw command on one line - no explanation, " +
                         "no markdown, no backticks, no preamble. If the request is too " +
                         "vague or unsafe to turn into a command, respond with exactly: UNSURE"
                 )
+            }
+            val messages = JSONArray()
+            messages.put(JSONObject().apply {
+                put("role", "system")
+                put("content", systemPrompt)
             })
             messages.put(JSONObject().apply {
                 put("role", "user")
                 put("content", phrase)
             })
             val body = JSONObject().apply {
-                put("model", "llama-3.3-70b-versatile")
+                put("model", "openai/gpt-oss-120b")
                 put("max_tokens", 200)
                 put("messages", messages)
             }
@@ -112,6 +182,45 @@ fun askGroqForCommand(phrase: String, apiKey: String, onResult: (String?, String
             onResult(resultCommand, resultError)
         }
     }.start()
+}
+
+/**
+ * Hands a command off to Termux to actually run it (git, python, and other
+ * dev tools only exist in Termux's own filesystem, not this app's sandbox).
+ * Writes the command to a script in the public Downloads folder — the one
+ * location both this app and Termux can both reach — then fires Termux's
+ * RUN_COMMAND intent to execute it there in the background. Requires the
+ * com.termux.permission.RUN_COMMAND permission, same as Voice Mode.
+ */
+fun executeInTermux(context: android.content.Context, command: String) {
+    try {
+        val scriptFile = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            "vicious_run.sh"
+        )
+        scriptFile.writeText("#!/data/data/com.termux/files/usr/bin/bash\n$command\n")
+        scriptFile.setExecutable(true)
+
+        val intent = Intent()
+        intent.setClassName("com.termux", "com.termux.app.RunCommandService")
+        intent.action = "com.termux.RUN_COMMAND"
+        intent.putExtra(
+            "com.termux.RUN_COMMAND_PATH",
+            "/data/data/com.termux/files/home/storage/downloads/vicious_run.sh"
+        )
+        intent.putExtra("com.termux.RUN_COMMAND_BACKGROUND", false)
+        intent.putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0")
+        context.startService(intent)
+        Toast.makeText(context, "Running in Termux…", Toast.LENGTH_SHORT).show()
+    } catch (e: SecurityException) {
+        Toast.makeText(
+            context,
+            "Permission denied by Termux — check 'allow-external-apps=true' in ~/.termux/termux.properties",
+            Toast.LENGTH_LONG
+        ).show()
+    } catch (e: Exception) {
+        Toast.makeText(context, "Couldn't run in Termux: ${e.message}", Toast.LENGTH_LONG).show()
+    }
 }
 
 // ---- Vicious Ability dark theme ----
@@ -170,6 +279,13 @@ fun ViciousAbilityApp(commandManager: CommandManager) {
             var askAiLoading by remember { mutableStateOf(false) }
             var askAiKeyInput by remember { mutableStateOf("") }
 
+            val savedGitConfig = remember { loadGitConfig(context) }
+            var gitEmail by remember { mutableStateOf(savedGitConfig.first ?: "") }
+            var gitRepoPath by remember { mutableStateOf(savedGitConfig.second ?: "") }
+            var showGitSettingsDialog by remember { mutableStateOf(false) }
+            var gitEmailInput by remember { mutableStateOf(gitEmail) }
+            var gitRepoPathInput by remember { mutableStateOf(gitRepoPath) }
+
             fun launchVoiceMode() {
                 try {
                     val intent = Intent()
@@ -215,6 +331,36 @@ fun ViciousAbilityApp(commandManager: CommandManager) {
                 }
             }
 
+            var pendingTermuxCommand by remember { mutableStateOf<String?>(null) }
+            val termuxRunPermissionLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestPermission()
+            ) { granted ->
+                val cmd = pendingTermuxCommand
+                pendingTermuxCommand = null
+                if (granted && cmd != null) {
+                    executeInTermux(context, cmd)
+                } else if (!granted) {
+                    Toast.makeText(
+                        context,
+                        "RUN_COMMAND permission denied — can't run in Termux",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+
+            fun runInTermux(command: String) {
+                val granted = ContextCompat.checkSelfPermission(
+                    context,
+                    "com.termux.permission.RUN_COMMAND"
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    executeInTermux(context, command)
+                } else {
+                    pendingTermuxCommand = command
+                    termuxRunPermissionLauncher.launch("com.termux.permission.RUN_COMMAND")
+                }
+            }
+
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -223,7 +369,7 @@ fun ViciousAbilityApp(commandManager: CommandManager) {
                 // ---- Header ----
                 Column(modifier = Modifier.padding(bottom = 20.dp)) {
                     Text(
-                        "🤖 VICIOUS ABILITY",
+                        "🤖 VICIOUS AI",
                         style = MaterialTheme.typography.headlineMedium,
                         color = ViciousAccent
                     )
@@ -326,6 +472,51 @@ fun ViciousAbilityApp(commandManager: CommandManager) {
                         modifier = Modifier.weight(1f)
                     ) {
                         Text("🔄 SYNC")
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            gitEmailInput = gitEmail
+                            gitRepoPathInput = gitRepoPath
+                            showGitSettingsDialog = true
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = ViciousAccent
+                        ),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("⚙️ GIT SETUP")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (gitRepoPath.isBlank()) {
+                                Toast.makeText(
+                                    context,
+                                    "Set a repo path in GIT SETUP first",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            } else {
+                                val emailCmd = if (gitEmail.isNotBlank()) {
+                                    "git config user.email \"$gitEmail\" && "
+                                } else ""
+                                val command = "cd \"$gitRepoPath\" && $emailCmd" +
+                                    "git add -A && git commit -m \"Auto commit from Vicious AI\" && git push"
+                                runInTermux(command)
+                            }
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = ViciousAccent
+                        ),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("📤 AUTO COMMIT")
                     }
                 }
 
@@ -458,6 +649,61 @@ fun ViciousAbilityApp(commandManager: CommandManager) {
                     }
                 }
 
+                // ---- Git Settings Dialog ----
+                if (showGitSettingsDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showGitSettingsDialog = false },
+                        title = { Text("Git Setup", color = ViciousAccent) },
+                        text = {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .verticalScroll(rememberScrollState())
+                            ) {
+                                Text(
+                                    "Used to build commit/push commands from Ask AI and the Auto Commit button.",
+                                    color = ViciousTextSecondary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(bottom = 8.dp)
+                                )
+                                OutlinedTextField(
+                                    value = gitRepoPathInput,
+                                    onValueChange = { gitRepoPathInput = it },
+                                    label = { Text("Repo path") },
+                                    placeholder = { Text("/data/data/com.termux/files/home/Vicious-ai-") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                OutlinedTextField(
+                                    value = gitEmailInput,
+                                    onValueChange = { gitEmailInput = it },
+                                    label = { Text("Git commit email") },
+                                    placeholder = { Text("you@example.com") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 8.dp)
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                gitEmail = gitEmailInput.trim()
+                                gitRepoPath = gitRepoPathInput.trim()
+                                saveGitConfig(context, gitEmail, gitRepoPath)
+                                showGitSettingsDialog = false
+                            }) {
+                                Text("Save", color = ViciousAccent)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showGitSettingsDialog = false }) {
+                                Text("Cancel", color = ViciousTextSecondary)
+                            }
+                        }
+                    )
+                }
+
                 // ---- Teach / Edit Dialog ----
                 if (showTeachDialog) {
                     val isEditing = editingTrigger != null
@@ -482,7 +728,11 @@ fun ViciousAbilityApp(commandManager: CommandManager) {
                             )
                         },
                         text = {
-                            Column {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .verticalScroll(rememberScrollState())
+                            ) {
                                 TextField(
                                     value = triggerInput,
                                     onValueChange = { triggerInput = it },
@@ -584,10 +834,12 @@ fun ViciousAbilityApp(commandManager: CommandManager) {
                                             "Suggested: $suggestion",
                                             color = ViciousAccent,
                                             style = MaterialTheme.typography.bodyMedium,
-                                            modifier = Modifier.padding(top = 8.dp)
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(top = 8.dp)
                                         )
                                         Text(
-                                            "This will be saved as a taught command. Run it from the CLI (Termux), not from this app, since dev tools like git only exist there.",
+                                            "Tap Run Now to execute this in Termux right away, or Save as Command to reuse it later.",
                                             color = ViciousTextSecondary,
                                             style = MaterialTheme.typography.bodySmall,
                                             modifier = Modifier.padding(top = 4.dp)
@@ -622,7 +874,12 @@ fun ViciousAbilityApp(commandManager: CommandManager) {
                                         if (phrase.isNotBlank()) {
                                             askAiLoading = true
                                             askAiError = null
-                                            askGroqForCommand(phrase, groqKey!!) { command, error ->
+                                            askGroqForCommand(
+                                                phrase,
+                                                groqKey!!,
+                                                gitEmail.ifBlank { null },
+                                                gitRepoPath.ifBlank { null }
+                                            ) { command, error ->
                                                 askAiLoading = false
                                                 askAiSuggestion = command
                                                 askAiError = error
@@ -634,17 +891,25 @@ fun ViciousAbilityApp(commandManager: CommandManager) {
                                     Text("Ask", color = ViciousAccent)
                                 }
                             } else {
-                                TextButton(onClick = {
-                                    commandManager.teach(askAiPhrase.trim(), askAiSuggestion!!)
-                                    taughtCommands = commandManager.getAll()
-                                    Toast.makeText(
-                                        context,
-                                        "Saved. Say it from the CLI or tap Sync to push it to Termux now.",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                    showAskAiDialog = false
-                                }) {
-                                    Text("Save as Command", color = ViciousAccent)
+                                Row {
+                                    TextButton(onClick = {
+                                        runInTermux(askAiSuggestion!!)
+                                        showAskAiDialog = false
+                                    }) {
+                                        Text("▶ Run Now", color = ViciousAccent)
+                                    }
+                                    TextButton(onClick = {
+                                        commandManager.teach(askAiPhrase.trim(), askAiSuggestion!!)
+                                        taughtCommands = commandManager.getAll()
+                                        Toast.makeText(
+                                            context,
+                                            "Saved. Say it from the CLI or tap Sync to push it to Termux now.",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                        showAskAiDialog = false
+                                    }) {
+                                        Text("Save as Command", color = ViciousAccent)
+                                    }
                                 }
                             }
                         },
