@@ -194,19 +194,27 @@ fun askGroqForCommand(
  */
 fun executeInTermux(context: android.content.Context, command: String) {
     try {
+        // Public storage (FUSE-emulated on modern Android) doesn't support the
+        // Unix executable bit, so a script written there can never be marked
+        // executable. Instead, launch Termux's own bash (which IS executable,
+        // since it lives in Termux's private storage) and pass the script as
+        // an argument — bash doesn't care whether its argument is executable.
         val scriptFile = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
             "vicious_run.sh"
         )
-        scriptFile.writeText("#!/data/data/com.termux/files/usr/bin/bash\n$command\n")
-        scriptFile.setExecutable(true)
+        scriptFile.writeText("$command\n")
 
         val intent = Intent()
         intent.setClassName("com.termux", "com.termux.app.RunCommandService")
         intent.action = "com.termux.RUN_COMMAND"
         intent.putExtra(
             "com.termux.RUN_COMMAND_PATH",
-            "/data/data/com.termux/files/home/storage/downloads/vicious_run.sh"
+            "/data/data/com.termux/files/usr/bin/bash"
+        )
+        intent.putExtra(
+            "com.termux.RUN_COMMAND_ARGUMENTS",
+            arrayOf("/data/data/com.termux/files/home/storage/downloads/vicious_run.sh")
         )
         intent.putExtra("com.termux.RUN_COMMAND_BACKGROUND", false)
         intent.putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0")
