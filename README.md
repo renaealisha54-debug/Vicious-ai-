@@ -6,7 +6,7 @@
 
 © 2026 Alisha Bevis. All rights reserved.
 
-# Vicious Ability
+# Vicious Ai
 
 Voice-first personal assistant — Android launcher (Kotlin/Compose) + Termux CLI backend.
 
