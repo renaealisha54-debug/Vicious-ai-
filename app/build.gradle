@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace 'com.renaealisha.viciousability'
+    namespace 'com.renaealisha.viciousai'
     compileSdk 35
 
     defaultConfig {
-        applicationId "com.renaealisha.viciousability"
+        applicationId "com.renaealisha.viciousai"
         minSdk 24
         targetSdk 35
         versionCode 1

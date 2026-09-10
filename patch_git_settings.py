@@ -1,4 +1,4 @@
-path = "app/src/main/java/com/renaealisha/viciousability/MainActivity.kt"
+path = "app/src/main/java/com/renaealisha/viciousai/MainActivity.kt"
 with open(path) as f:
     content = f.read()
 
