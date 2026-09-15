@@ -1,3 +1,10 @@
+// app/src/main/java/com/renaealisha/viciousai/MainActivity.kt
+// Full updated file - overwrite the existing one at this path in your repo.
+// Changes: auto-detects a git repo under ~/ollama/vicious-projects/ so
+// GIT SETUP no longer has to be filled in manually, and the AI now
+// defaults 'update repo' / 'sync my code' to stage+commit+push instead
+// of returning UNSURE.
+
 // Copyright (c) 2026 Alisha Bevis (renaealisha54-debug)
 // Vicious AI - Android APK
 
@@ -97,6 +104,39 @@ fun saveGitConfig(context: android.content.Context, email: String, repoPath: Str
 }
 
 /**
+ * Scans the known Termux projects directory for git repos (folders
+ * containing a .git subfolder) so Ask AI has a repo path to work with
+ * without the user having to open GIT SETUP and type it in manually.
+ * Returns the first repo found, or null if the projects directory
+ * doesn't exist yet or has no git repos in it.
+ * If more than one repo is found, all candidates are returned so the
+ * caller can decide (e.g. prefer the previously-saved one).
+ */
+fun autoDetectGitRepos(): List<String> {
+    val projectsRoot = java.io.File(
+        "/data/data/com.termux/files/home/ollama/vicious-projects"
+    )
+    if (!projectsRoot.isDirectory) return emptyList()
+    return projectsRoot.listFiles { f -> f.isDirectory }
+        ?.filter { java.io.File(it, ".git").isDirectory }
+        ?.map { it.absolutePath }
+        ?: emptyList()
+}
+
+/**
+ * Resolves the repo path to use for Ask AI: the saved one if present,
+ * otherwise the first auto-detected repo. Also persists an
+ * auto-detected path so future launches don't need to re-scan or ask.
+ */
+fun resolveGitRepoPath(context: android.content.Context, savedPath: String?): String? {
+    if (!savedPath.isNullOrBlank()) return savedPath
+    val detected = autoDetectGitRepos().firstOrNull() ?: return null
+    val (email, _) = loadGitConfig(context)
+    saveGitConfig(context, email ?: "", detected)
+    return detected
+}
+
+/**
  * Asks Groq (Llama 3.3 70B) to translate a phrase into an exact shell
  * command, same system prompt/behavior as the Python CLI's version so the
  * two stay consistent. Runs the network call on a background thread and
@@ -127,7 +167,12 @@ fun askGroqForCommand(
                         ". For any git commit or push request, cd into that repo, " +
                             "set the commit identity with 'git config user.email' " +
                             "if an email is given, then run the requested git command(s), " +
-                            "chained with && on one line. "
+                            "chained with && on one line. " +
+                            "If the request is a generic phrase like 'update repo', " +
+                            "'update the repo', or 'sync my code' with no further detail, " +
+                            "default to: stage all changes, commit with a short generic " +
+                            "message such as 'update', then push - do not respond UNSURE " +
+                            "just because no commit message was given. "
                     )
                 }
                 append(
@@ -289,7 +334,12 @@ fun ViciousAiApp(commandManager: CommandManager) {
 
             val savedGitConfig = remember { loadGitConfig(context) }
             var gitEmail by remember { mutableStateOf(savedGitConfig.first ?: "") }
-            var gitRepoPath by remember { mutableStateOf(savedGitConfig.second ?: "") }
+            // Falls back to auto-detecting a repo under vicious-projects/ so
+            // Ask AI works without a manual GIT SETUP visit; the detected
+            // path is persisted so this only scans once.
+            var gitRepoPath by remember {
+                mutableStateOf(resolveGitRepoPath(context, savedGitConfig.second) ?: "")
+            }
             var showGitSettingsDialog by remember { mutableStateOf(false) }
             var gitEmailInput by remember { mutableStateOf(gitEmail) }
             var gitRepoPathInput by remember { mutableStateOf(gitRepoPath) }

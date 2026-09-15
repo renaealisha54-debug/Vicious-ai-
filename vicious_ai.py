@@ -1,3 +1,7 @@
+# /data/data/com.termux/files/home/ollama/vicious-projects/vicious-ai/vicious_ai.py
+# Full updated file - replace the existing one at this path.
+# Adds: "check repo" / "repo status" command - runs git status in the
+# current directory (cd into a project first) and speaks a summary.
 # Copyright (c) 2026 Alisha Bevis (renaealisha54-debug)
 # Vicious AI - Voice AI Assistant (Termux:API version)
 
@@ -112,6 +116,42 @@ def handle_teach(command, taught):
         speak(f"Couldn't save that: {e}")
 
 
+def handle_check_repo():
+    """
+    Handles 'check repo' / 'repo status'. Runs git status in whatever
+    directory we're currently in (use 'cd <project>' first to pick one),
+    same convention as handle_cd. Reports a short summary out loud and
+    prints the full status output.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "status", "--short", "--branch"],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd(),
+            timeout=15,
+        )
+    except FileNotFoundError:
+        speak("Git isn't installed here.")
+        return
+    except Exception as e:
+        speak(f"Couldn't check the repo: {e}")
+        return
+
+    if result.returncode != 0:
+        speak(f"{os.getcwd()} isn't a git repo.")
+        return
+
+    lines = (result.stdout + result.stderr).strip().splitlines()
+    branch_line = lines[0] if lines else ""
+    changes = lines[1:]
+    if changes:
+        speak(f"{branch_line}. {len(changes)} changed file(s).")
+    else:
+        speak(f"{branch_line}. Clean, no changes.")
+    print("\n".join(lines) if lines else "Nothing to report.")
+
+
 speak("Vicious AI is now online. How can I help you?")
 
 while True:
@@ -149,6 +189,9 @@ while True:
 
     elif "where am i" in command or "current directory" in command:
         speak(f"You are in {os.getcwd()}")
+
+    elif "check repo" in command or "repo status" in command:
+        handle_check_repo()
 
     elif "exit" in command or "stop" in command or "goodbye" in command:
         speak("Goodbye Alisha. Shutting down.")
